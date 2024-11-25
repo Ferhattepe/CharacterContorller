@@ -6,8 +6,8 @@ using UnityEditor;
 namespace SingularityGroup.HotReload.Editor {
     internal sealed class ExposeServerOption : ComputerOptionBase {
 
-        public override string ShortSummary => "Allow Mobile Builds to Connect";
-        public override string Summary => "Allow Mobile Builds to Connect (WiFi)";
+        public override string ShortSummary => "Allow Devices to Connect";
+        public override string Summary => "Allow Devices to Connect (WiFi)";
 
         public override void InnerOnGUI() {
             string description;
@@ -57,18 +57,6 @@ namespace SingularityGroup.HotReload.Editor {
                 if (token.IsCancellationRequested) return;
                 try {
                     action();
-                } catch (Exception ex) {
-                    ThreadUtility.LogException(ex, token);
-                }
-            }, token);
-        }
-        
-        void RunTask(Func<Task> action) {
-            var token = HotReloadWindow.Current.cancelToken;
-            Task.Run(async () => {
-                if (token.IsCancellationRequested) return;
-                try {
-                    await action();
                 } catch (Exception ex) {
                     ThreadUtility.LogException(ex, token);
                 }

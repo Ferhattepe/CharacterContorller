@@ -1652,13 +1652,14 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   joystick: {fileID: 1599130043}
   RootMotionSpeed: 0.5
-  JumpForce: 3
+  JumpForce: 2
   WhatIsGround:
     serializedVersion: 2
     m_Bits: 1
   GroundCheckRadius: 0.1
   GroundCheckHeightOffset: 0.1
   GroundCheckSize: 0.5
+  AirInfluenceControll: 10
 --- !u!4 &2129503006 stripped
 Transform:
   m_CorrespondingSourceObject: {fileID: -8679921383154817045, guid: 41b0b1bd04d1e4d6ca13ab26edfca31f,

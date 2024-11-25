@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Threading;
@@ -11,7 +12,6 @@ using System.Threading.Tasks;
 using JetBrains.Annotations;
 using SingularityGroup.HotReload.DTO;
 using SingularityGroup.HotReload.Newtonsoft.Json;
-using SingularityGroup.HotReload.RuntimeDependencies;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -41,11 +41,13 @@ namespace SingularityGroup.HotReload {
         public List<string> features;
         public string generalInfo;
     }
-    
+
     static class RequestHelper {
-        internal const ushort port = 33242;
-        const string defaultServerHost = "127.0.0.1";
+        internal const ushort defaultPort = 33242;
+        internal const string defaultServerHost = "127.0.0.1";
         const string ChangelogURL = "https://d2tc55zjhw51ly.cloudfront.net/releases/latest/changelog.json";
+        static readonly string defaultOrigin = Path.GetDirectoryName(UnityHelper.DataPath);
+        public static string origin { get; private set; } = defaultOrigin;
         
         static PatchServerInfo serverInfo = new PatchServerInfo(defaultServerHost, null, null);
         public static PatchServerInfo ServerInfo => serverInfo;
@@ -53,11 +55,22 @@ namespace SingularityGroup.HotReload {
         static string cachedUrl;
         static string url => cachedUrl ?? (cachedUrl = CreateUrl(serverInfo));
         
-        static readonly HttpClient client = new HttpClient();
+        public static int port => serverInfo?.port ?? defaultPort;
+
+        static readonly HttpClient client = CreateHttpClientWithOrigin();
         // separate client for each long polling request
-        static readonly HttpClient clientPollPatches = new HttpClient();
-        static readonly HttpClient clientPollAssets = new HttpClient();
-        static readonly HttpClient clientPollStatus = new HttpClient();
+        static readonly HttpClient clientPollPatches = CreateHttpClientWithOrigin();
+        static readonly HttpClient clientPollAssets = CreateHttpClientWithOrigin();
+        static readonly HttpClient clientPollStatus = CreateHttpClientWithOrigin();
+        
+        static readonly HttpClient[] allClients = new[] { client, clientPollPatches, clientPollAssets, clientPollStatus };
+        
+        static HttpClient CreateHttpClientWithOrigin() {
+            var httpClient = HttpClientUtils.CreateHttpClient();
+            httpClient.DefaultRequestHeaders.Add("origin", Path.GetDirectoryName(UnityHelper.DataPath));
+
+            return httpClient;
+        }
         
         /// <summary>
         /// Create url for a hostname and port
@@ -65,18 +78,42 @@ namespace SingularityGroup.HotReload {
         internal static string CreateUrl(PatchServerInfo server) {
             return $"http://{server.hostName}:{server.port.ToString()}";
         }
+        
+        public static void SetServerPort(int port) {
+            serverInfo = new PatchServerInfo(serverInfo.hostName, port, serverInfo.commitHash, serverInfo.rootPath);
+            cachedUrl = null;
+            Log.Debug($"SetServerInfo to {CreateUrl(serverInfo)}");
+        }
 
         public static void SetServerInfo(PatchServerInfo info) {
             if (info != null) Log.Debug($"SetServerInfo to {CreateUrl(info)}");
             serverInfo = info;
             cachedUrl = null;
+
+            if (info?.customRequestOrigin != null) {
+                SetOrigin(info.customRequestOrigin);
+            }
         }
-        
+
+        // This function is not thread safe but is currently called before the first request is sent so no issue.
+        static void SetOrigin(string newOrigin) {
+            if (newOrigin == origin) {
+                return;
+            }
+            origin = newOrigin;
+            
+            foreach (var httpClient in allClients) {
+                httpClient.DefaultRequestHeaders.Remove("origin");
+                httpClient.DefaultRequestHeaders.Add("origin", newOrigin);
+            }
+        }
+
         static string[] assemblySearchPaths;
         public static void ChangeAssemblySearchPaths(string[] paths) {
             assemblySearchPaths = paths;
         }
 
+        // Don't use for requests to HR server
         [UsedImplicitly]
         internal static async Task<string> GetAsync(string path) {
             using (UnityWebRequest www = UnityWebRequest.Get(path)) {
@@ -90,16 +127,6 @@ namespace SingularityGroup.HotReload {
             }
         }
 
-        internal static async Task<bool> PostUnityJsonAsync(string path, string body) {
-            using (UnityWebRequest www = new UnityWebRequest(url + path, "POST")) {
-                www.downloadHandler = new DownloadHandlerBuffer();
-                www.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(body));
-                www.uploadHandler.contentType = "application/json";
-                await SendRequestAsync(www);
-                return string.IsNullOrEmpty(www.error);
-            }
-        }
-
         internal static Task<UnityWebRequestAsyncOperation> SendRequestAsync(UnityWebRequest www) {
             var req = www.SendWebRequest();
             var tcs = new TaskCompletionSource<UnityWebRequestAsyncOperation>();
@@ -108,10 +135,10 @@ namespace SingularityGroup.HotReload {
         }
 
         static bool pollPending;
-        internal static string lastPatchId;
-        internal static async void PollMethodPatches(Action<MethodPatchResponse> onResponseReceived) {
-            if (pollPending) return;
-        
+        internal static async void PollMethodPatches(string lastPatchId, Action<MethodPatchResponse> onResponseReceived) {
+            if (pollPending) {
+                return;
+            }
             pollPending = true;
             var searchPaths = assemblySearchPaths ?? CodePatcher.I.GetAssemblySearchPaths();
             var body = SerializeRequestBody(new MethodPatchRequest(lastPatchId, searchPaths, TimeSpan.FromSeconds(20), Path.GetDirectoryName(Application.dataPath)));
@@ -125,7 +152,6 @@ namespace SingularityGroup.HotReload {
                     await ThreadUtility.SwitchToMainThread();
                     foreach(var response in responses) {
                         onResponseReceived(response);
-                        lastPatchId = response.id;
                     }
                 } else if(result.statusCode == HttpStatusCode.Unauthorized || result.statusCode == 0) {
                     // Server is not running or not authorized.
@@ -145,7 +171,7 @@ namespace SingularityGroup.HotReload {
         static bool pollPatchStatusPending;
         internal static async void PollPatchStatus(Action<PatchStatusResponse> onResponseReceived, PatchStatus latestStatus) {
             if (pollPatchStatusPending) return;
-        
+
             pollPatchStatusPending = true;
             var body = SerializeRequestBody(new PatchStatusRequest(TimeSpan.FromSeconds(20), latestStatus));
             
@@ -190,7 +216,7 @@ namespace SingularityGroup.HotReload {
                         var response = responses[i];
                         // Avoid importing assets twice
                         if (responses.Contains(response + ".meta")) {
-                            Log.Info($"Ignoring asset change inside Unity: {response}");
+                            Log.Debug($"Ignoring asset change inside Unity: {response}");
                             continue;
                         }
                         onResponseReceived(response);
@@ -223,16 +249,28 @@ namespace SingularityGroup.HotReload {
             return null;
         }
         
-        internal static async Task<LoginStatusResponse> GetLoginStatus(int timeoutSeconds) {
-            var tcs = new TaskCompletionSource<LoginStatusResponse>();
-            LoginRequestUtility.RequestLoginStatus(url, timeoutSeconds, resp => tcs.TrySetResult(resp));
-            return await tcs.Task;
+        public static async Task<LoginStatusResponse> RequestLogin(string email, string password, int timeoutSeconds) {
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var json = SerializeRequestBody(new Dictionary<string, object> {
+                { "email", email },
+                { "password", password },
+            });
+            var resp = await PostJson(url + "/login", json, timeoutSeconds, cts.Token);
+            if (resp.exception == null) {
+                return JsonConvert.DeserializeObject<LoginStatusResponse>(resp.responseText);
+            } else {
+                return LoginStatusResponse.FromRequestError($"{resp.exception.GetType().Name} {resp.exception.Message}");
+            }
         }
         
-        internal static async Task<LoginStatusResponse> RequestLogin(string email, string password, int timeoutSeconds) {
-            var tcs = new TaskCompletionSource<LoginStatusResponse>();
-            LoginRequestUtility.RequestLogin(url, email, password, timeoutSeconds, resp => tcs.TrySetResult(resp));
-            return await tcs.Task;
+        public static async Task<LoginStatusResponse> GetLoginStatus(int timeoutSeconds) {
+            var cts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+            var resp = await PostJson(url + "/status", string.Empty, timeoutSeconds, cts.Token);
+            if (resp.exception == null) {
+                return JsonConvert.DeserializeObject<LoginStatusResponse>(resp.responseText);
+            } else {
+                return LoginStatusResponse.FromRequestError($"{resp.exception.GetType().Name} {resp.exception.Message}");
+            }
         }
         
         internal static async Task<LoginStatusResponse> RequestLogout(int timeoutSeconds = 10) {
@@ -289,7 +327,7 @@ namespace SingularityGroup.HotReload {
 
         internal static async Task KillServerInternal() {
             try {
-                using(await client.PostAsync(CreateUrl(serverInfo) + "/kill", new StringContent(Path.GetDirectoryName(UnityHelper.DataPath))).ConfigureAwait(false)) { }
+                using(await client.PostAsync(CreateUrl(serverInfo) + "/kill", new StringContent(origin)).ConfigureAwait(false)) { }
             } catch {
                 //ignored
             } 

@@ -13,6 +13,7 @@ public class AnimatorMover : MonoBehaviour
     public float GroundCheckRadius = 0.1f;
     public float GroundCheckHeightOffset = 0.1f;
     public float GroundCheckSize = 0.5f;
+    public float AirInfluenceControll = 0.5f;
 
     public Vector3 RootMotionDeltaPosition { get; private set; }
     public float MovementSpeed { get; private set; }
@@ -30,6 +31,7 @@ public class AnimatorMover : MonoBehaviour
     private static readonly int MovingTurn = Animator.StringToHash("MovingTurn");
     private static readonly int Grounded = Animator.StringToHash("Grounded");
     private static readonly int Jumping = Animator.StringToHash("Jumping");
+
 
     private void Awake()
     {
@@ -71,6 +73,29 @@ public class AnimatorMover : MonoBehaviour
         if (Input.GetKeyDown(KeyCode.Space) && IsJumping is false)
         {
             Jump();
+        }
+    }
+
+    private void FixedUpdate()
+    {
+        // if (IsGrounded == true && IsJumping == false)
+        //     _animator.applyRootMotion = true;
+        // else
+        //     _animator.applyRootMotion = false;
+
+        InAirMovementControl(JumpInert: true);
+    }
+
+    private void InAirMovementControl(bool JumpInert = true)
+    {
+        if (!IsGrounded)
+        {
+            if (IsMoving)
+            {
+                transform.Translate(0, -1f * Time.deltaTime, 0);
+                transform.Translate(transform.forward * AirInfluenceControll / 2 * Time.deltaTime,
+                    Space.World);
+            }
         }
     }
 
